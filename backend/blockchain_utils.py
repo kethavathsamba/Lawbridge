@@ -24,27 +24,41 @@ CONTRACT_BYTECODE = """
 """
 
 def get_web3_connection():
-    """Get Web3 connection to Polygon Amoy"""
+    """Get Web3 connection to Polygon Amoy with timeout and error handling"""
     provider_url = os.getenv(
         "WEB3_PROVIDER_URL", 
         "https://rpc-amoy.polygon.technology/"
     )
-    web3 = Web3(Web3.HTTPProvider(provider_url))
-    
-    if not web3.is_connected():
-        raise Exception("Failed to connect to blockchain provider")
-    
-    return web3
+    try:
+        # Use HTTPProvider with timeout to prevent hanging
+        web3 = Web3(Web3.HTTPProvider(provider_url, request_kwargs={"timeout": 10}))
+        
+        if not web3.is_connected():
+            raise Exception(f"Failed to connect to blockchain provider at {provider_url}")
+        
+        return web3
+    except Exception as e:
+        print(f"[ERROR] Web3 connection failed: {e}")
+        print(f"[DEBUG] Provider URL: {provider_url}")
+        raise
 
 def get_deployer_account():
     """Get deployer account from private key"""
     private_key = os.getenv("BLOCKCHAIN_PRIVATE_KEY")
     if not private_key:
-        raise Exception("BLOCKCHAIN_PRIVATE_KEY not configured")
+        raise Exception(
+            "❌ BLOCKCHAIN_PRIVATE_KEY not configured in .env\n"
+            "This is required to sign transactions for installment transfers.\n"
+            "Add your platform wallet's private key to .env:\n"
+            "BLOCKCHAIN_PRIVATE_KEY=<your-private-key-without-0x>"
+        )
     
-    web3 = get_web3_connection()
-    account = web3.eth.account.from_key(private_key)
-    return account, web3
+    try:
+        web3 = get_web3_connection()
+        account = web3.eth.account.from_key(private_key)
+        return account, web3
+    except ValueError as e:
+        raise Exception(f"Invalid BLOCKCHAIN_PRIVATE_KEY format: {str(e)}")
 
 def deploy_escrow_contract(lawyer_address: str, platform_wallet: str) -> dict:
     """
@@ -137,4 +151,75 @@ def get_escrow_status(contract_address: str) -> dict:
     
     except Exception as e:
         print(f"[ERROR] Failed to get escrow status: {e}")
+        raise
+
+def transfer_installment_to_lawyer(contract_address: str, lawyer_address: str, amount_wei: int) -> dict:
+    """
+    Transfer installment amount from escrow to lawyer's wallet
+    
+    Args:
+        contract_address: Deployed escrow contract address
+        lawyer_address: Lawyer's wallet address
+        amount_wei: Amount in wei to transfer
+    
+    Returns:
+        dict with txHash, gasUsed, blockNumber
+    """
+    try:
+        print(f"[Blockchain] Transferring installment to lawyer...")
+        print(f"  Contract: {contract_address}")
+        print(f"  Lawyer: {lawyer_address}")
+        print(f"  Amount: {Web3.from_wei(amount_wei, 'ether')} POL")
+        
+        # Validate addresses
+        if not Web3.is_address(lawyer_address):
+            raise ValueError("Invalid lawyer Ethereum address")
+        
+        account, web3 = get_deployer_account()
+        abi = get_contract_abi()
+        
+        contract = web3.eth.contract(
+            address=Web3.to_checksum_address(contract_address),
+            abi=abi
+        )
+        
+        # Get current balance of the contract
+        contract_balance = web3.eth.get_balance(Web3.to_checksum_address(contract_address))
+        print(f"  Contract balance: {web3.from_wei(contract_balance, 'ether')} POL")
+        
+        if contract_balance < amount_wei:
+            raise ValueError(f"Insufficient funds in escrow. Available: {web3.from_wei(contract_balance, 'ether')} POL, Requested: {web3.from_wei(amount_wei, 'ether')} POL")
+        
+        # Build transaction to transfer funds directly from platform wallet to lawyer
+        # This simulates an installment payment
+        tx = {
+            "from": account.address,
+            "to": Web3.to_checksum_address(lawyer_address),
+            "value": amount_wei,
+            "gas": 21000,  # Standard gas for POL transfer
+            "gasPrice": web3.eth.gas_price,
+            "nonce": web3.eth.get_transaction_count(account.address)
+        }
+        
+        # Sign and send transaction
+        signed_tx = web3.eth.account.sign_transaction(tx, account.key)
+        tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        
+        print(f"  TX Hash: {tx_hash.hex()}")
+        print(f"  Waiting for confirmation...")
+        
+        # Wait for receipt
+        receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+        
+        print(f"  ✓ Installment transferred: {tx_hash.hex()}")
+        
+        return {
+            "txHash": tx_hash.hex(),
+            "gasUsed": receipt["gasUsed"],
+            "blockNumber": receipt["blockNumber"],
+            "amount": Web3.from_wei(amount_wei, "ether")
+        }
+    
+    except Exception as e:
+        print(f"[ERROR] Installment transfer failed: {e}")
         raise

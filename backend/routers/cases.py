@@ -16,6 +16,15 @@ except ImportError:
     def create_deployment_instructions(*args, **kwargs):
         return {"error": "Blockchain service not configured"}
 
+try:
+    from blockchain_utils import transfer_installment_to_lawyer
+    from web3 import Web3
+    BLOCKCHAIN_TRANSFERS_ENABLED = True
+except ImportError:
+    BLOCKCHAIN_TRANSFERS_ENABLED = False
+    def transfer_installment_to_lawyer(*args, **kwargs):
+        raise Exception("Blockchain transfer service not configured")
+
 from models import (
     CaseCreateBody,
     CaseUpdateBody,
@@ -261,7 +270,76 @@ def add_case_payment(case_id: str, body: CasePaymentBody, user=Depends(get_curre
         "status": "pending",
         "createdAt": now,
         "approvedAt": None,
+        "txHash": None,  # Will be populated if blockchain transfer succeeds
     }
+    
+    # Attempt to transfer installment to lawyer's wallet automatically
+    transfer_status = "not_attempted"
+    transfer_error = None
+    transfer_tx_hash = None
+    
+    lawyer_wallet = c.get("lawyerWalletAddress")
+    escrow_contract = c.get("escrowContractAddress")
+    
+    if BLOCKCHAIN_TRANSFERS_ENABLED and lawyer_wallet and escrow_contract:
+        try:
+            print(f"[Installment] Attempting automatic transfer to lawyer: {lawyer_wallet}")
+            # Convert amount to wei (assuming POL/native token with 18 decimals)
+            amount_wei = Web3.to_wei(body.amount, 'ether')
+            
+            transfer_result = transfer_installment_to_lawyer(
+                contract_address=escrow_contract,
+                lawyer_address=lawyer_wallet,
+                amount_wei=amount_wei
+            )
+            
+            transfer_status = "completed"
+            transfer_tx_hash = transfer_result.get("txHash")
+            req["txHash"] = transfer_tx_hash
+            
+            # Record transaction
+            escrow_txns_coll = get_collection("escrow_transactions")
+            txn_record = {
+                "caseId": case_id,
+                "type": "installment",
+                "lawyerAddress": lawyer_wallet,
+                "amount": body.amount,
+                "txHash": transfer_tx_hash,
+                "status": "completed",
+                "gasUsed": transfer_result.get("gasUsed"),
+                "blockNumber": transfer_result.get("blockNumber"),
+                "createdAt": now,
+            }
+            escrow_txns_coll.insert_one(txn_record)
+            
+            print(f"  ✓ Installment transferred successfully: {transfer_tx_hash}")
+        
+        except Exception as e:
+            transfer_status = "failed"
+            transfer_error = str(e)
+            print(f"  [WARNING] Automatic transfer failed: {transfer_error}")
+            print(f"  Installment request will be created pending client approval")
+    else:
+        transfer_status = "not_available"
+        if not BLOCKCHAIN_TRANSFERS_ENABLED:
+            transfer_error = "Blockchain transfer service not configured"
+        elif not lawyer_wallet:
+            transfer_error = "Lawyer wallet address not set"
+        elif not escrow_contract:
+            transfer_error = "Escrow contract not deployed"
+        print(f"  [INFO] Blockchain transfer not available: {transfer_error}")
+    
+    # Add note about transfer attempt
+    if transfer_status == "completed":
+        req["transferStatus"] = "completed"
+        req["transferNote"] = f"Automatic payment transferred to lawyer. TX: {transfer_tx_hash}"
+    elif transfer_status == "failed":
+        req["transferStatus"] = "failed"
+        req["transferNote"] = f"Automatic transfer failed: {transfer_error}. Awaiting client approval."
+    else:
+        req["transferStatus"] = transfer_status
+        req["transferNote"] = transfer_error or "No blockchain transfer attempted"
+    
     coll.update_one(
         {"_id": oid},
         {
@@ -400,14 +478,55 @@ def decide_installment_request(
                 detail=f"Insufficient escrow balance. Available: {escrow_amt}, Requested: {amt}"
             )
         
-        # Create escrow transfer transaction
+        # Get lawyer wallet address
+        lawyer_wallet = c.get("lawyerWalletAddress")
+        escrow_contract = c.get("escrowContractAddress")
+        
+        # Attempt automatic blockchain transfer to lawyer
+        transfer_tx_hash = None
+        transfer_status = "pending"
+        transfer_error = None
+        
+        if BLOCKCHAIN_TRANSFERS_ENABLED and lawyer_wallet and escrow_contract:
+            try:
+                print(f"[Installment Approval] Transferring {amt} to lawyer: {lawyer_wallet}")
+                # Convert amount to wei (assuming POL/native token with 18 decimals)
+                amount_wei = Web3.to_wei(amt, 'ether')
+                
+                transfer_result = transfer_installment_to_lawyer(
+                    contract_address=escrow_contract,
+                    lawyer_address=lawyer_wallet,
+                    amount_wei=amount_wei
+                )
+                
+                transfer_status = "completed"
+                transfer_tx_hash = transfer_result.get("txHash")
+                
+                print(f"  ✓ Coins transferred to lawyer wallet: {transfer_tx_hash}")
+                
+            except Exception as transfer_err:
+                transfer_status = "failed"
+                transfer_error = str(transfer_err)
+                print(f"  [WARNING] Automatic transfer failed: {transfer_error}")
+        else:
+            if not BLOCKCHAIN_TRANSFERS_ENABLED:
+                transfer_error = "Blockchain transfer service not available (BLOCKCHAIN_PRIVATE_KEY not set)"
+            elif not lawyer_wallet:
+                transfer_error = "Lawyer wallet address not connected"
+            elif not escrow_contract:
+                transfer_error = "Escrow contract not deployed"
+            print(f"  [INFO] {transfer_error}")
+        
+        # Create escrow transfer transaction record
         transfer = {
             "caseId": case_id,
             "clientId": user["id"],
             "lawyerId": c.get("lawyerId"),
             "amount": amt,
             "type": "installment_transfer",
-            "status": "disbursed",
+            "status": transfer_status,
+            "txHash": transfer_tx_hash,
+            "transferError": transfer_error,
             "reason": f"Installment approved by client: {reqs[idx].get('progressNote', '')}",
             "createdAt": now,
             "updatedAt": now,
@@ -427,6 +546,8 @@ def decide_installment_request(
                 "amount": amt,
                 "note": reqs[idx].get("progressNote"),
                 "transferredTo": "lawyer",
+                "transferStatus": transfer_status,
+                "txHash": transfer_tx_hash,
                 "createdAt": now,
             }
         )

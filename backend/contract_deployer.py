@@ -15,8 +15,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Polygon Amoy RPC endpoint
-AMOY_RPC_URL = "https://rpc-amoy.polygon.technology/"
+# Polygon Amoy RPC endpoint (can be overridden with environment variable)
+AMOY_RPC_URL = os.getenv("WEB3_PROVIDER_URL", "https://rpc-amoy.polygon.technology/")
 AMOY_CHAIN_ID = 80002
 
 # Contract bytecode and ABI (compiled from LawBridgeEscrow.sol)
@@ -136,10 +136,15 @@ class ContractDeployer:
         if not Web3:
             raise ImportError("web3 package not installed. Install with: pip install web3")
         
-        self.w3 = Web3(Web3.HTTPProvider(AMOY_RPC_URL))
-        if not self.w3.is_connected():
-            logger.error("Failed to connect to Polygon Amoy RPC")
-            raise ConnectionError("Cannot connect to Polygon Amoy network")
+        try:
+            # Use HTTPProvider with timeout to prevent hanging
+            self.w3 = Web3(Web3.HTTPProvider(AMOY_RPC_URL, request_kwargs={"timeout": 10}))
+            if not self.w3.is_connected():
+                logger.error(f"Failed to connect to Polygon Amoy RPC: {AMOY_RPC_URL}")
+                raise ConnectionError(f"Cannot connect to Polygon Amoy network at {AMOY_RPC_URL}")
+        except Exception as e:
+            logger.error(f"Web3 connection error: {e}")
+            raise ConnectionError(f"Web3 connection failed: {str(e)}")
 
     def get_contract_abi(self) -> Dict:
         """Get contract ABI"""

@@ -20,8 +20,29 @@ RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "rzp_test_key")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "rzp_test_secret")
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
-# Web3 setup for blockchain verification
-web3 = Web3(Web3.HTTPProvider(os.getenv("WEB3_PROVIDER_URL", "https://rpc-mumbai.maticvigil.com")))
+# Web3 connection (lazy initialized to avoid import-time failures)
+_web3_instance = None
+
+def _get_web3_connection():
+    """Get or create a fresh Web3 connection with error handling"""
+    global _web3_instance
+    provider_url = os.getenv("WEB3_PROVIDER_URL", "https://rpc-amoy.polygon.technology/")
+    
+    try:
+        # Create fresh instance each time to avoid stale connections
+        web3 = Web3(Web3.HTTPProvider(provider_url, request_kwargs={"timeout": 10}))
+        
+        # Test connection
+        if not web3.is_connected():
+            raise Exception(f"Failed to connect to {provider_url}")
+        
+        _web3_instance = web3
+        return web3
+    except Exception as e:
+        print(f"[ERROR] Web3 connection failed: {e}")
+        print(f"[DEBUG] Provider URL: {provider_url}")
+        raise
+
 
 
 def _now():
@@ -64,22 +85,34 @@ async def confirm_blockchain_payment(
         # Step 1: Verify transaction on blockchain
         print(f"[Payment] Verifying TX: {request.txHash}")
         
-        if not web3.is_connected():
+        try:
+            web3 = _get_web3_connection()
+        except Exception as conn_err:
+            print(f"[ERROR] Web3 connection failed: {conn_err}")
             raise HTTPException(
                 status_code=500,
-                detail="Web3 connection failed"
+                detail=f"Backend error: Web3 connection failed - {str(conn_err)}"
             )
         
         # Get transaction receipt
-        tx_receipt = web3.eth.get_transaction_receipt(request.txHash)
-        
-        if not tx_receipt:
+        try:
+            tx_receipt = web3.eth.get_transaction_receipt(request.txHash)
+        except Exception as receipt_err:
+            print(f"[ERROR] Failed to get TX receipt: {receipt_err}")
             raise HTTPException(
                 status_code=400,
-                detail="Transaction not found on blockchain"
+                detail=f"Could not verify transaction: {str(receipt_err)}"
+            )
+        
+        if not tx_receipt:
+            print(f"[ERROR] TX receipt is None for {request.txHash}")
+            raise HTTPException(
+                status_code=400,
+                detail="Transaction not found on blockchain. Make sure it was successfully mined."
             )
         
         if tx_receipt["status"] != 1:
+            print(f"[ERROR] TX failed on blockchain: {tx_receipt}")
             raise HTTPException(
                 status_code=400,
                 detail="Transaction failed on blockchain"
@@ -108,16 +141,33 @@ async def confirm_blockchain_payment(
         
         # Step 3: Update case status
         cases_coll = get_collection("cases")
-        cases_coll.update_one(
-            {"_id": ObjectId(request.caseId)},
-            {
-                "$set": {
-                    "paymentStatus": "FUNDED",
-                    "escrowId": request.escrowId,
-                    "updatedAt": datetime.utcnow()
+        try:
+            # Validate caseId format
+            try:
+                case_oid = ObjectId(request.caseId)
+            except Exception as oid_err:
+                print(f"[ERROR] Invalid case ID format: {request.caseId} - {oid_err}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid case ID format: {str(oid_err)}"
+                )
+            
+            update_result = cases_coll.update_one(
+                {"_id": case_oid},
+                {
+                    "$set": {
+                        "paymentStatus": "FUNDED",
+                        "escrowId": request.escrowId,
+                        "updatedAt": datetime.utcnow()
+                    }
                 }
-            }
-        )
+            )
+            print(f"  ✓ Case updated: {update_result.matched_count} matched, {update_result.modified_count} modified")
+        except HTTPException:
+            raise
+        except Exception as case_err:
+            print(f"[WARNING] Failed to update case: {case_err}")
+            # Don't fail the whole payment if case update fails
         
         print(f"  ✓ Payment recorded in DB: {result.inserted_id}")
         
@@ -132,10 +182,13 @@ async def confirm_blockchain_payment(
         raise
     except Exception as err:
         print(f"[ERROR] Payment confirmation failed: {err}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"Payment verification failed: {str(err)}"
         )
+
 
 
 @router.get("/status/{payment_id}")

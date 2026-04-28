@@ -1,5 +1,44 @@
 import { ethers } from "ethers";
-import { getEscrowContract, CONTRACT_ADDRESS, getConnectedAccount, getAmoyRpcProvider, ensureAmoyNetwork } from "./blockchain-config";
+import { getEscrowContract, CONTRACT_ADDRESS, getConnectedAccount, getAmoyRpcProvider, ensureAmoyNetwork, getProvider } from "./blockchain-config";
+
+/**
+ * Get proper EIP-1559 gas parameters with buffer to meet minimum requirements
+ * @returns {Promise<{maxFeePerGas: BigNumber, maxPriorityFeePerGas: BigNumber}>}
+ */
+export const getGasPrice = async () => {
+    try {
+        const provider = getProvider();
+        const feeData = await provider.getFeeData();
+        
+        // Get maxPriorityFeePerGas with buffer to ensure minimum of 25 Gwei
+        const minPriorityFeePerGas = ethers.utils.parseUnits("25", "gwei");
+        let maxPriorityFeePerGas = feeData.maxPriorityFeePerGas || minPriorityFeePerGas;
+        
+        // If estimated priority fee is below minimum, use minimum
+        if (maxPriorityFeePerGas.lt(minPriorityFeePerGas)) {
+            maxPriorityFeePerGas = minPriorityFeePerGas;
+            console.log(`[Gas Price] Adjusted priority fee to minimum: ${ethers.utils.formatUnits(maxPriorityFeePerGas, "gwei")} Gwei`);
+        }
+        
+        // Calculate maxFeePerGas = baseFee + maxPriorityFeePerGas + buffer
+        const baseFee = feeData.lastBaseFeePerGas || ethers.utils.parseUnits("1", "gwei");
+        const buffer = ethers.utils.parseUnits("2", "gwei"); // 2 Gwei buffer
+        const maxFeePerGas = baseFee.add(maxPriorityFeePerGas).add(buffer);
+        
+        console.log(`[Gas Price] Base Fee: ${ethers.utils.formatUnits(baseFee, "gwei")} Gwei`);
+        console.log(`[Gas Price] Priority Fee: ${ethers.utils.formatUnits(maxPriorityFeePerGas, "gwei")} Gwei`);
+        console.log(`[Gas Price] Max Fee: ${ethers.utils.formatUnits(maxFeePerGas, "gwei")} Gwei`);
+        
+        return { maxFeePerGas, maxPriorityFeePerGas };
+    } catch (err) {
+        console.error("[Gas Price] Error fetching gas prices:", err);
+        // Fallback to safe defaults
+        return {
+            maxFeePerGas: ethers.utils.parseUnits("50", "gwei"),
+            maxPriorityFeePerGas: ethers.utils.parseUnits("25", "gwei")
+        };
+    }
+};
 
 /**
  * Deposit funds into escrow (Client deposits payment)
@@ -28,22 +67,33 @@ export const depositToEscrow = async (lawyerAddress, amountETH) => {
         console.log("[Step 1/1] Depositing funds to escrow...");
         console.log(`  - Amount in Wei: ${amountInWei.toString()}`);
 
+        // Get proper gas prices
+        const gasParams = await getGasPrice();
+
         // Try deposit with gas estimation fallback
         let tx;
         try {
             tx = await escrow.deposit({
-                value: amountInWei
+                value: amountInWei,
+                ...gasParams,
+                gasLimit: 500000
             });
         } catch (gasErr) {
             console.warn("[WARN] Gas estimation failed, trying with manual gas limit...", gasErr.code);
             
-            // If gas estimation fails, provide manual gas limit
+            // If gas estimation fails, provide manual gas limit with higher gas prices
             if (gasErr.code === "UNPREDICTABLE_GAS_LIMIT") {
-                console.log("[INFO] Using fallback gas limit (500000)");
-                tx = await escrow.deposit(
-                    { value: amountInWei },
-                    { gasLimit: 500000 }
-                );
+                console.log("[INFO] Using fallback gas limit (500000) with adjusted gas prices");
+                // Increase gas prices for retry
+                const retryGasParams = {
+                    maxFeePerGas: gasParams.maxFeePerGas.mul(120).div(100), // 20% increase
+                    maxPriorityFeePerGas: gasParams.maxPriorityFeePerGas.mul(120).div(100)
+                };
+                tx = await escrow.deposit({
+                    value: amountInWei,
+                    ...retryGasParams,
+                    gasLimit: 500000
+                });
             } else {
                 throw gasErr;
             }
@@ -90,7 +140,12 @@ export const adminApproveAndRelease = async () => {
         await ensureAmoyNetwork();
         
         const escrow = await getEscrowContract();
-        const tx = await escrow.adminApproveAndRelease();
+        const gasParams = await getGasPrice();
+        
+        const tx = await escrow.adminApproveAndRelease({
+            ...gasParams,
+            gasLimit: 500000
+        });
         
         console.log("  - TX Hash:", tx.hash);
         const receipt = await tx.wait();
@@ -118,7 +173,12 @@ export const adminApproveRelease = async () => {
         await ensureAmoyNetwork();
         
         const escrow = await getEscrowContract();
-        const tx = await escrow.adminApprove();
+        const gasParams = await getGasPrice();
+        
+        const tx = await escrow.adminApprove({
+            ...gasParams,
+            gasLimit: 500000
+        });
         
         console.log("  - TX Hash:", tx.hash);
         const receipt = await tx.wait();
@@ -146,7 +206,12 @@ export const lawyerClaimApprovedFunds = async () => {
         await ensureAmoyNetwork();
         
         const escrow = await getEscrowContract();
-        const tx = await escrow.claimApprovedFunds();
+        const gasParams = await getGasPrice();
+        
+        const tx = await escrow.claimApprovedFunds({
+            ...gasParams,
+            gasLimit: 500000
+        });
         
         console.log("  - TX Hash:", tx.hash);
         const receipt = await tx.wait();
@@ -173,8 +238,12 @@ export const releasePaymentFromEscrow = async () => {
         await ensureAmoyNetwork();
         
         const escrow = await getEscrowContract();
-        // Use the new admin function
-        const tx = await escrow.adminApproveAndRelease();
+        const gasParams = await getGasPrice();
+        
+        const tx = await escrow.adminApproveAndRelease({
+            ...gasParams,
+            gasLimit: 500000
+        });
         
         console.log("  - TX Hash:", tx.hash);
         const receipt = await tx.wait();
@@ -200,7 +269,12 @@ export const refundEscrow = async () => {
         await ensureAmoyNetwork();
         
         const escrow = await getEscrowContract();
-        const tx = await escrow.refund();
+        const gasParams = await getGasPrice();
+        
+        const tx = await escrow.refund({
+            ...gasParams,
+            gasLimit: 500000
+        });
         
         console.log("  - TX Hash:", tx.hash);
         const receipt = await tx.wait();

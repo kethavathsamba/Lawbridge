@@ -22,78 +22,104 @@ contract LawBridgeEscrow {
     address public client;
     address public lawyer;
     address public platformWallet;
+
     uint public amount;
-    bool public isDeposited;
+    uint public depositCount;
     bool public isReleased;
     bool public caseCompleted;
     bool public adminApproved;
 
-    event Deposited(address indexed client, uint amount);
+    event Deposited(address indexed client, uint amount, uint depositCount);
     event Released(address indexed lawyer, uint amount);
     event Refunded(address indexed client, uint amount);
     event AdminApprovalGranted(address indexed lawyer);
 
     constructor(address _lawyer, address _platformWallet) {
+        client = address(0);
         lawyer = _lawyer;
         platformWallet = _platformWallet;
         adminApproved = false;
         caseCompleted = false;
+        depositCount = 0;
     }
 
+    // Deposit POL (native token) - allows multiple deposits
     function deposit() public payable {
-        require(!isDeposited, "Already deposited");
-        require(msg.value > 0, "Amount must be greater than 0");
+        require(msg.value > 0, "ERR_ZERO_AMOUNT");
+        
         if (client == address(0)) {
             client = msg.sender;
+        } else {
+            require(msg.sender == client, "ERR_NOT_CLIENT");
         }
-        require(msg.sender == client, "Only client");
+        
         amount = msg.value;
-        isDeposited = true;
-        emit Deposited(client, msg.value);
+        depositCount += 1;
+        emit Deposited(client, msg.value, depositCount);
     }
 
+    // Admin approves and automatically releases to lawyer
     function adminApproveAndRelease() public {
-        require(msg.sender == platformWallet, "Only platform admin can approve");
-        require(isDeposited, "No funds to release");
-        require(!isReleased, "Already released");
+        require(msg.sender == platformWallet, "ERR_NOT_ADMIN");
+        require(amount > 0, "ERR_NO_FUNDS");
+        require(!isReleased, "ERR_ALREADY_RELEASED");
+        
         adminApproved = true;
         caseCompleted = true;
         isReleased = true;
-        payable(lawyer).transfer(amount);
+        
+        uint releaseAmount = amount;
+        amount = 0;
+        
+        (bool success, ) = payable(lawyer).call{value: releaseAmount}("");
+        require(success, "ERR_TRANSFER_FAILED");
         emit AdminApprovalGranted(lawyer);
-        emit Released(lawyer, amount);
+        emit Released(lawyer, releaseAmount);
     }
 
+    // Two-step: Admin approves first
     function adminApprove() public {
-        require(msg.sender == platformWallet, "Only platform admin can approve");
-        require(isDeposited, "No funds available");
-        require(!isReleased, "Already released");
+        require(msg.sender == platformWallet, "ERR_NOT_ADMIN");
+        require(amount > 0, "ERR_NO_FUNDS");
+        require(!isReleased, "ERR_ALREADY_RELEASED");
+        
         adminApproved = true;
         emit AdminApprovalGranted(lawyer);
     }
 
+    // Lawyer claims approved funds
     function claimApprovedFunds() public {
-        require(msg.sender == lawyer, "Only lawyer can claim");
-        require(isDeposited, "No funds available");
-        require(adminApproved, "Not approved by admin");
-        require(!isReleased, "Already released");
+        require(msg.sender == lawyer, "ERR_NOT_LAWYER");
+        require(amount > 0, "ERR_NO_FUNDS");
+        require(adminApproved, "ERR_NOT_APPROVED");
+        require(!isReleased, "ERR_ALREADY_RELEASED");
+
         isReleased = true;
-        payable(lawyer).transfer(amount);
-        emit Released(lawyer, amount);
+        uint releaseAmount = amount;
+        amount = 0;
+        
+        (bool success, ) = payable(lawyer).call{value: releaseAmount}("");
+        require(success, "ERR_TRANSFER_FAILED");
+        emit Released(lawyer, releaseAmount);
     }
 
+    // Refund to client
     function refund() public {
-        require(msg.sender == platformWallet, "Only platform can refund");
-        require(isDeposited, "No funds to refund");
-        require(!isReleased, "Already released, cannot refund");
-        require(!adminApproved, "Cannot refund approved cases");
-        isDeposited = false;
-        payable(client).transfer(amount);
-        emit Refunded(client, amount);
+        require(msg.sender == platformWallet, "ERR_NOT_ADMIN");
+        require(amount > 0, "ERR_NO_FUNDS");
+        require(!isReleased, "ERR_ALREADY_RELEASED");
+        require(!adminApproved, "ERR_CASE_APPROVED");
+
+        uint refundAmount = amount;
+        amount = 0;
+        
+        (bool success, ) = payable(client).call{value: refundAmount}("");
+        require(success, "ERR_TRANSFER_FAILED");
+        emit Refunded(client, refundAmount);
     }
 
-    function getStatus() public view returns (bool, bool, bool, uint) {
-        return (isDeposited, adminApproved, isReleased, amount);
+    function getStatus() public view returns (uint, bool, bool, uint) {
+        return (depositCount, adminApproved, isReleased, amount);
     }
 }
 `;

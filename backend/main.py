@@ -4,9 +4,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import json
+import traceback
 from starlette.requests import Request
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -61,6 +62,19 @@ app.include_router(billing.router)
 app.include_router(notifications.router)
 app.include_router(support.router)
 app.include_router(payments.router)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch all unhandled exceptions and return detailed error"""
+    print(f"[GLOBAL ERROR] Unhandled exception: {exc}")
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": str(exc),
+            "error_type": type(exc).__name__
+        }
+    )
 
 @app.middleware("http")
 async def custom_json_encoder_middleware(request: Request, call_next):

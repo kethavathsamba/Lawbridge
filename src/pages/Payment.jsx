@@ -220,24 +220,37 @@ export default function Payment() {
             }
 
             console.log("Confirming payment with backend...");
+            const token = localStorage.getItem("lawbridge_token");
+            if (!token) {
+                throw new Error("Not authenticated. Please log in first.");
+            }
             const response = await fetch(`${apiUrl}/payments/confirm`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    Authorization: `Bearer ${localStorage.getItem("token")}`
+                    Authorization: `Bearer ${token}`
                 },
                 body: JSON.stringify({
-                    caseId,
+                    caseId: caseId,
+                    escrowId: caseId, // Use caseId as escrowId (they're linked)
                     txHash: result.txHash,
-                    amountINR: amountUSDC,
-                    amountPOL: amountPOL,
-                    lawyerAddress,
+                    amountUSDC: parseFloat(amountUSDC), // Rename from amountINR to amountUSDC
+                    lawyerAddress: lawyerAddress,
                     clientAddress: account
                 })
             });
 
             if (!response.ok) {
-                throw new Error(`Backend error: ${response.statusText}`);
+                // Try to get detailed error message from response
+                let errorDetail = response.statusText;
+                try {
+                    const errorData = await response.json();
+                    errorDetail = errorData.detail || errorData.message || response.statusText;
+                    console.error("Backend error details:", errorData);
+                } catch (parseErr) {
+                    console.error("Could not parse error response:", parseErr);
+                }
+                throw new Error(`Backend error: ${errorDetail}`);
             }
 
             const data = await response.json();
