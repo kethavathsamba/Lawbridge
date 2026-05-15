@@ -19,11 +19,14 @@ except ImportError:
 try:
     from blockchain_utils import transfer_installment_to_lawyer
     from web3 import Web3
+    from currency_converter import convert_inr_to_pol
     BLOCKCHAIN_TRANSFERS_ENABLED = True
 except ImportError:
     BLOCKCHAIN_TRANSFERS_ENABLED = False
     def transfer_installment_to_lawyer(*args, **kwargs):
         raise Exception("Blockchain transfer service not configured")
+    def convert_inr_to_pol(*args, **kwargs):
+        raise Exception("Currency converter not available")
 
 from models import (
     CaseCreateBody,
@@ -284,8 +287,14 @@ def add_case_payment(case_id: str, body: CasePaymentBody, user=Depends(get_curre
     if BLOCKCHAIN_TRANSFERS_ENABLED and lawyer_wallet and escrow_contract:
         try:
             print(f"[Installment] Attempting automatic transfer to lawyer: {lawyer_wallet}")
-            # Convert amount to wei (assuming POL/native token with 18 decimals)
-            amount_wei = Web3.to_wei(body.amount, 'ether')
+            # Convert amount: INR → POL → Wei (18 decimals)
+            amount_inr = float(body.amount)
+            amount_pol = convert_inr_to_pol(amount_inr)
+            amount_wei = Web3.to_wei(amount_pol, 'ether')
+            
+            print(f"  Amount INR: {amount_inr}")
+            print(f"  Amount POL: {amount_pol}")
+            print(f"  Amount Wei: {amount_wei}")
             
             transfer_result = transfer_installment_to_lawyer(
                 contract_address=escrow_contract,
@@ -490,8 +499,14 @@ def decide_installment_request(
         if BLOCKCHAIN_TRANSFERS_ENABLED and lawyer_wallet and escrow_contract:
             try:
                 print(f"[Installment Approval] Transferring {amt} to lawyer: {lawyer_wallet}")
-                # Convert amount to wei (assuming POL/native token with 18 decimals)
-                amount_wei = Web3.to_wei(amt, 'ether')
+                # Convert amount: INR → POL → Wei (18 decimals)
+                amount_inr = float(amt)
+                amount_pol = convert_inr_to_pol(amount_inr)
+                amount_wei = Web3.to_wei(amount_pol, 'ether')
+                
+                print(f"  Amount INR: {amount_inr}")
+                print(f"  Amount POL: {amount_pol}")
+                print(f"  Amount Wei: {amount_wei}")
                 
                 transfer_result = transfer_installment_to_lawyer(
                     contract_address=escrow_contract,

@@ -169,7 +169,12 @@ def transfer_installment_to_lawyer(contract_address: str, lawyer_address: str, a
         print(f"[Blockchain] Transferring installment to lawyer...")
         print(f"  Contract: {contract_address}")
         print(f"  Lawyer: {lawyer_address}")
-        print(f"  Amount: {Web3.from_wei(amount_wei, 'ether')} POL")
+        print(f"  Amount (wei): {amount_wei}")
+        print(f"  Amount (POL): {Web3.from_wei(amount_wei, 'ether')} POL")
+        
+        # Validate amount
+        if not isinstance(amount_wei, int) or amount_wei <= 0:
+            raise ValueError(f"Invalid transfer amount. Must be positive integer in wei, got: {amount_wei} (type: {type(amount_wei).__name__})")
         
         # Validate addresses
         if not Web3.is_address(lawyer_address):
@@ -187,11 +192,31 @@ def transfer_installment_to_lawyer(contract_address: str, lawyer_address: str, a
         contract_balance = web3.eth.get_balance(Web3.to_checksum_address(contract_address))
         print(f"  Contract balance: {web3.from_wei(contract_balance, 'ether')} POL")
         
+        # Get current balance of platform wallet
+        platform_balance = web3.eth.get_balance(account.address)
+        print(f"  Platform wallet balance: {web3.from_wei(platform_balance, 'ether')} POL")
+        
+        # Calculate gas cost (21000 gas * gas_price)
+        gas_price = web3.eth.gas_price
+        gas_cost = 21000 * gas_price
+        print(f"  Gas price: {web3.from_wei(gas_price, 'gwei')} gwei")
+        print(f"  Estimated gas cost: {web3.from_wei(gas_cost, 'ether')} POL")
+        
+        # Validate sufficient balance in both escrow and platform wallet
         if contract_balance < amount_wei:
             raise ValueError(f"Insufficient funds in escrow. Available: {web3.from_wei(contract_balance, 'ether')} POL, Requested: {web3.from_wei(amount_wei, 'ether')} POL")
         
+        total_needed = amount_wei + gas_cost
+        if platform_balance < total_needed:
+            raise ValueError(f"Insufficient platform wallet balance. Available: {web3.from_wei(platform_balance, 'ether')} POL, Needed: {web3.from_wei(total_needed, 'ether')} POL (amount + gas)")
+        
         # Build transaction to transfer funds directly from platform wallet to lawyer
         # This simulates an installment payment
+        print(f"  [DEBUG] Building transaction:")
+        print(f"    From: {account.address}")
+        print(f"    To: {Web3.to_checksum_address(lawyer_address)}")
+        print(f"    Value: {amount_wei} wei = {Web3.from_wei(amount_wei, 'ether')} POL")
+        
         tx = {
             "from": account.address,
             "to": Web3.to_checksum_address(lawyer_address),
